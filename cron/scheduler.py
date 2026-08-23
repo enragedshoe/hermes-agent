@@ -14,6 +14,7 @@ import contextvars
 import json
 import logging
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -937,19 +938,25 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
     except Exception:
         pass
 
+    process = None
     try:
-        popen_kwargs = {"creationflags": windows_hide_flags()} if sys.platform == "win32" else {}
-        result = subprocess.run(
+        popen_kwargs = (
+            {"creationflags": windows_hide_flags()}
+            if sys.platform == "win32"
+            else {"start_new_session": True}
+        )
+        process = subprocess.Popen(
             argv,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=script_timeout,
             cwd=str(path.parent),
             env=run_env,
             **popen_kwargs,
         )
-        stdout = (result.stdout or "").strip()
-        stderr = (result.stderr or "").strip()
+        stdout, stderr = process.communicate(timeout=script_timeout)
+        stdout = (stdout or "").strip()
+        stderr = (stderr or "").strip()
 
         # Redact secrets from both stdout and stderr before any return path.
         try:
@@ -959,8 +966,8 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         except Exception:
             pass
 
-        if result.returncode != 0:
-            parts = [f"Script exited with code {result.returncode}"]
+        if process.returncode != 0:
+            parts = [f"Script exited with code {process.returncode}"]
             if stderr:
                 parts.append(f"stderr:\n{stderr}")
             if stdout:
@@ -970,6 +977,23 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
         return True, stdout
 
     except subprocess.TimeoutExpired:
+        if process is not None and process.poll() is None:
+            try:
+                if sys.platform == "win32":
+                    process.terminate()
+                else:
+                    os.killpg(process.pid, signal.SIGTERM)
+                process.communicate(timeout=5)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                if process.poll() is None:
+                    if sys.platform == "win32":
+                        process.kill()
+                    else:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    process.communicate()
         return False, f"Script timed out after {script_timeout}s: {path}"
     except Exception as exc:
         return False, f"Script execution failed: {exc}"
@@ -1347,6 +1371,17 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
     if script_path:
         prerun_script = _run_job_script(script_path)
         _ran_ok, _script_output = prerun_script
+        if not _ran_ok:
+            error = f"Pre-run script failed: {_script_output}"
+            logger.error("Job '%s' (ID: %s): %s", job_name, job_id, error)
+            failed_doc = (
+                f"# Cron Job: {job_name}\n\n"
+                f"**Job ID:** {job_id}\n"
+                f"**Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                "**Status:** pre-run script failed\n\n"
+                f"{_script_output}\n"
+            )
+            return False, failed_doc, "", error
         if _ran_ok and not _parse_wake_gate(_script_output):
             logger.info(
                 "Job '%s' (ID: %s): wakeAgent=false, skipping agent run",

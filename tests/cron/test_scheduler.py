@@ -2102,23 +2102,20 @@ class TestRunJobWakeGate:
 
         assert call_count == 1, f"script ran {call_count}x, expected exactly 1"
 
-    def test_script_failure_does_not_trigger_gate(self):
-        """If _run_job_script returns success=False, the gate is NOT evaluated
-        and the agent still runs (the failure is reported as context)."""
+    def test_script_failure_fails_job_without_running_agent(self):
+        """A failed pre-run must not be masked by a successful agent reply."""
         import cron.scheduler as scheduler
 
-        # Malicious or broken script whose stderr happens to contain the
-        # gate JSON — we must NOT honor it because ran_ok is False.
-        agent = MagicMock()
-        agent.run_conversation = MagicMock(return_value={
-            "final_response": "ok", "messages": []
-        })
         with patch.object(scheduler, "_run_job_script",
                           return_value=(False, '{"wakeAgent": false}')), \
-             patch("run_agent.AIAgent", return_value=agent) as agent_cls:
+             patch("run_agent.AIAgent") as agent_cls:
             success, doc, final, err = scheduler.run_job(self._make_job())
 
-        agent_cls.assert_called_once()  # Agent DID wake despite the gate-like text
+        agent_cls.assert_not_called()
+        assert success is False
+        assert final == ""
+        assert "pre-run script failed" in doc
+        assert "Pre-run script failed" in err
 
     def test_no_script_path_runs_agent_normally(self):
         """Regression: jobs without a script still work."""

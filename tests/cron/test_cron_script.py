@@ -12,6 +12,7 @@ import os
 import stat
 import sys
 import textwrap
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -157,6 +158,36 @@ class TestRunJobScript:
         success, output = _run_job_script(str(script))
         assert success is False
         assert "timed out" in output.lower()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process-group behavior")
+    def test_script_timeout_terminates_child_process_group(self, cron_env, monkeypatch):
+        from cron import scheduler as sched_mod
+        from cron.scheduler import _run_job_script
+
+        monkeypatch.setattr(sched_mod, "_SCRIPT_TIMEOUT", 1)
+        marker = cron_env / "child-terminated"
+        child_code = (
+            "import pathlib, signal, sys, time; "
+            f"marker = pathlib.Path({str(marker)!r}); "
+            "signal.signal(signal.SIGTERM, lambda *_: (marker.write_text('terminated'), sys.exit(0))); "
+            "time.sleep(30)"
+        )
+        script = cron_env / "scripts" / "spawn_child.py"
+        script.write_text(
+            "import subprocess, sys, time\n"
+            f"subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
+            "time.sleep(30)\n"
+        )
+
+        success, output = _run_job_script(str(script))
+
+        assert success is False
+        assert "timed out" in output.lower()
+        for _ in range(20):
+            if marker.exists():
+                break
+            time.sleep(0.1)
+        assert marker.read_text() == "terminated"
 
     def test_script_json_output(self, cron_env):
         """Scripts can output structured JSON for the LLM to parse."""

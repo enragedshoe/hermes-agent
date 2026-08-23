@@ -1689,6 +1689,8 @@ DEFAULT_CONFIG = {
         # 1 = serial (pre-v0.9 behaviour).
         # Also overridable via HERMES_CRON_MAX_PARALLEL env var.
         "max_parallel_jobs": None,
+        # Maximum wall time for a pre-run data-collection script.
+        "script_timeout_seconds": 120,
     },
 
     # Kanban multi-agent coordination — controls the dispatcher loop that
