@@ -772,6 +772,39 @@ _LOOPBACK_HOST_VALUES: frozenset = frozenset({
     "localhost", "127.0.0.1", "::1",
 })
 
+_RFC1918_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+
+
+def _single_user_private_bind_bypass(
+    host: str,
+    allow_public: bool,
+    trusted_public_hosts: frozenset[str],
+    enabled: bool,
+) -> bool:
+    """Allow this deployment's explicit, auth-free single-user private bind.
+
+    The override is deliberately narrower than restoring the legacy
+    ``--insecure`` behavior: it requires both the CLI opt-in and the canonical
+    ``dashboard.single_user_no_auth`` config setting, accepts only an exact
+    RFC1918 destination address, and refuses any configured browser-facing
+    public URL. Wildcard, hostname, CGNAT/Tailscale, and internet binds therefore
+    keep the upstream fail-closed auth gate. This does not filter routed source
+    peers; operators must trust every peer that can route to the private bind.
+    """
+    if not allow_public or enabled is not True:
+        return False
+    if trusted_public_hosts:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(address in network for network in _RFC1918_NETWORKS)
+
 
 def _dashboard_public_hosts() -> frozenset[str]:
     """Return the exact hostname declared by ``dashboard.public_url``.
@@ -19600,9 +19633,16 @@ def start_server(
     # engages the auth gate even when the backend itself remains on loopback;
     # otherwise the SPA's local session token would become remotely reachable.
     app.state.trusted_public_hosts = _dashboard_public_hosts()
+    try:
+        _dashboard_config_snapshot = load_config().get("dashboard") or {}
+    except Exception:
+        _dashboard_config_snapshot = {}
+    if not isinstance(_dashboard_config_snapshot, dict):
+        _dashboard_config_snapshot = {}
     # Stash the auth-gate flag on app.state so middleware / SPA-token injection /
     # WS-auth paths can branch on it consistently. It also decides whether to
     # refuse startup, log the gate-on banner, and enable uvicorn proxy_headers.
+    _single_user_no_auth = False
     if _desktop_loopback_auth_exempt(host, ssh_session_token, ssh_owner_nonce):
         # A configured dashboard.public_url describes the operator's PUBLIC
         # deployment, not this private Desktop-owned loopback backend (#96490).
@@ -19616,15 +19656,29 @@ def start_server(
             "keeps its own gate.",
         )
     else:
+        _single_user_no_auth = _single_user_private_bind_bypass(
+            host,
+            allow_public,
+            app.state.trusted_public_hosts,
+            _dashboard_config_snapshot.get("single_user_no_auth") is True,
+        )
         app.state.auth_required = should_require_dashboard_auth(
             host, app.state.trusted_public_hosts
-        )
+        ) and not _single_user_no_auth
 
-    # ``--insecure`` no longer disables the auth gate (June 2026 hardening:
-    # the hermes-0day MCP-persistence campaign abused unauthenticated public
-    # dashboards). If a caller still passes it, warn that it is now a no-op
-    # rather than silently changing their expectation of an open bind.
-    if allow_public and host not in _LOOPBACK_HOST_VALUES:
+    # ``--insecure`` alone no longer disables the auth gate (June 2026
+    # hardening: the hermes-0day MCP-persistence campaign abused
+    # unauthenticated public dashboards). This deployment's narrowly guarded
+    # single-user private-bind mode is the only exception; otherwise warn that
+    # the flag is a no-op rather than silently changing the caller's expectation.
+    if _single_user_no_auth:
+        _log.warning(
+            "Dashboard authentication is disabled for the explicit "
+            "single-user RFC1918 bind %s. Every peer that can route to this "
+            "private address must be trusted.",
+            host,
+        )
+    elif allow_public and host not in _LOOPBACK_HOST_VALUES:
         _log.warning(
             "--insecure no longer bypasses dashboard authentication. A "
             "non-loopback bind (%s) now ALWAYS requires an auth provider "
@@ -19789,10 +19843,7 @@ def start_server(
     # Non-loopback ping cadence is config-driven (dashboard.ws_ping_interval /
     # dashboard.ws_ping_timeout, #79635); the 20/20 defaults keep the
     # Cloudflare-Tunnel-friendly behaviour when unset or invalid.
-    try:
-        _dash_cfg = load_config().get("dashboard") or {}
-    except Exception:
-        _dash_cfg = {}
+    _dash_cfg = _dashboard_config_snapshot
 
     def _ws_ping_setting(key: str, default: float = 20.0) -> float:
         try:

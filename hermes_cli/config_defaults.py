@@ -1694,6 +1694,13 @@ DEFAULT_CONFIG = {
         # Set this to True to re-enable the surfaces with the understanding
         # that the numbers are a local lower-bound estimate, not billing.
         "show_token_analytics": False,
+        # Explicit single-user deployment override for an authentication-free
+        # Dashboard on an exact RFC1918 bind. The runtime additionally requires
+        # ``--insecure`` and refuses wildcard, hostname, CGNAT/Tailscale, or
+        # configured public-URL binds. This does not filter routed source peers;
+        # enable it only when every peer able to route to the private address is
+        # trusted.
+        "single_user_no_auth": False,
         # IP addresses or bounded CIDR networks of reverse proxies allowed to
         # supply X-Forwarded-Proto / X-Forwarded-For. Loopback remains trusted
         # automatically. Wildcards and /0 networks are rejected so arbitrary

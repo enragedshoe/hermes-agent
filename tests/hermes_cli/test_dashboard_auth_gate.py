@@ -185,6 +185,75 @@ def test_start_server_insecure_public_no_longer_bypasses_gate(monkeypatch):
     assert web_server.app.state.auth_required is True
 
 
+def test_start_server_explicit_single_user_private_bind_bypasses_gate(
+    tmp_path, monkeypatch
+):
+    """The real config loader enables the narrowly guarded deployment mode."""
+    from hermes_cli.dashboard_auth import clear_providers
+
+    hermes_home = tmp_path / "hermes-home"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text(
+        "dashboard:\n  single_user_no_auth: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    clear_providers()
+    _stub_uvicorn_run(monkeypatch)
+    assert web_server.load_config()["dashboard"]["single_user_no_auth"] is True
+    web_server.app.state.auth_required = None
+
+    web_server.start_server(
+        host="192.168.1.145",
+        port=0,
+        open_browser=False,
+        allow_public=True,
+    )
+
+    assert web_server.app.state.auth_required is False
+
+
+@pytest.mark.parametrize(
+    "host,allow_public,trusted_public_hosts,enabled",
+    [
+        ("0.0.0.0", True, frozenset(), True),
+        ("192.168.1.145", False, frozenset(), True),
+        ("192.168.1.145", True, frozenset({"hermes.example.com"}), True),
+        ("100.64.0.10", True, frozenset(), True),
+        ("hermes.lan", True, frozenset(), True),
+        ("192.168.1.145", True, frozenset(), False),
+    ],
+)
+def test_start_server_single_user_mode_rejects_broader_exposure(
+    monkeypatch, host, allow_public, trusted_public_hosts, enabled
+):
+    from hermes_cli.dashboard_auth import clear_providers
+
+    clear_providers()
+    _stub_uvicorn_run(monkeypatch)
+    monkeypatch.setattr(
+        web_server,
+        "load_config",
+        lambda: {"dashboard": {"single_user_no_auth": enabled}},
+    )
+    monkeypatch.setattr(
+        web_server,
+        "_dashboard_public_hosts",
+        lambda: trusted_public_hosts,
+    )
+    web_server.app.state.auth_required = None
+
+    with pytest.raises(SystemExit):
+        web_server.start_server(
+            host=host,
+            port=0,
+            open_browser=False,
+            allow_public=allow_public,
+        )
+
+    assert web_server.app.state.auth_required is True
+
+
 def test_start_server_public_without_insecure_records_auth_required(monkeypatch):
     """Public bind without --insecure: the gate engages and auth_required=True.
 
