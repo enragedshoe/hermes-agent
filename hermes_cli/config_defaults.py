@@ -939,8 +939,16 @@ DEFAULT_CONFIG = {
         # auxiliary calls, retries, fallbacks and cache writes are missed, so the total can be
         # 10x-100x under the provider bill.
         "show_token_analytics": False,
+        # Explicit single-user deployment override for an authentication-free
+        # Dashboard on an exact RFC1918 bind. The runtime additionally requires
+        # ``--insecure`` and refuses wildcard, hostname, CGNAT/Tailscale, or
+        # configured public-URL binds. This does not filter routed source peers;
+        # enable it only when every peer able to route to the private address is
+        # trusted.
+        "single_user_no_auth": False,
         # IPs / bounded CIDRs of reverse proxies trusted to supply X-Forwarded-Proto/-For. Loopback
         # always trusted; wildcards and /0 rejected (spoofing guard).
+
         "trusted_proxies": [],
         # WebSocket keepalive (seconds), NON-loopback binds only: loopback always disables the
         # protocol ping so an event-loop stall never kills a healthy local connection.

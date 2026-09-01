@@ -437,6 +437,39 @@ def _require_token(request: Request) -> None:
 # at the app layer rejects it. See GHSA-ppp5-vxwm-4cf7.
 _LOOPBACK_HOST_VALUES: frozenset = frozenset({"localhost", "127.0.0.1", "::1"})
 
+_RFC1918_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+)
+
+
+def _single_user_private_bind_bypass(
+    host: str,
+    allow_public: bool,
+    trusted_public_hosts: frozenset[str],
+    enabled: bool,
+) -> bool:
+    """Allow this deployment's explicit, auth-free single-user private bind.
+
+    The override is deliberately narrower than restoring the legacy
+    ``--insecure`` behavior: it requires both the CLI opt-in and the canonical
+    ``dashboard.single_user_no_auth`` config setting, accepts only an exact
+    RFC1918 destination address, and refuses any configured browser-facing
+    public URL. Wildcard, hostname, CGNAT/Tailscale, and internet binds therefore
+    keep the upstream fail-closed auth gate. This does not filter routed source
+    peers; operators must trust every peer that can route to the private bind.
+    """
+    if not allow_public or enabled is not True:
+        return False
+    if trusted_public_hosts:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(address in network for network in _RFC1918_NETWORKS)
+
 
 def _dashboard_public_hosts() -> frozenset[str]:
     """Return the exact hostname declared by ``dashboard.public_url``.
@@ -1089,8 +1122,16 @@ def _configure_auth_gate(
     # config. A non-loopback public hostname engages the gate even on a loopback
     # backend, else the SPA's local session token becomes remotely reachable.
     app.state.trusted_public_hosts = _dashboard_public_hosts()
-    # auth_required drives middleware, SPA-token injection, WS auth, the
-    # startup refusal, the gate-on banner and uvicorn proxy_headers.
+    try:
+        _dashboard_config_snapshot = load_config().get("dashboard") or {}
+    except Exception:
+        _dashboard_config_snapshot = {}
+    if not isinstance(_dashboard_config_snapshot, dict):
+        _dashboard_config_snapshot = {}
+    # Stash the auth-gate flag on app.state so middleware / SPA-token injection /
+    # WS-auth paths can branch on it consistently. It also decides whether to
+    # refuse startup, log the gate-on banner, and enable uvicorn proxy_headers.
+    _single_user_no_auth = False
     if _desktop_loopback_auth_exempt(host, ssh_session_token, ssh_owner_nonce):
         # public_url describes the operator's PUBLIC deployment, not this
         # Desktop-owned loopback backend (#96490), which authenticates with the
@@ -1102,11 +1143,29 @@ def _configure_auth_gate(
             "keeps its own gate.",
         )
     else:
-        app.state.auth_required = should_require_dashboard_auth(host, app.state.trusted_public_hosts)
+        _single_user_no_auth = _single_user_private_bind_bypass(
+            host,
+            allow_public,
+            app.state.trusted_public_hosts,
+            _dashboard_config_snapshot.get("single_user_no_auth") is True,
+        )
+        app.state.auth_required = should_require_dashboard_auth(
+            host, app.state.trusted_public_hosts
+        ) and not _single_user_no_auth
 
-    # ``--insecure`` no longer disables the gate (June 2026 hermes-0day
-    # hardening); warn that it is a no-op rather than silently ignore it.
-    if allow_public and host not in _LOOPBACK_HOST_VALUES:
+    # ``--insecure`` alone no longer disables the auth gate (June 2026
+    # hardening: the hermes-0day MCP-persistence campaign abused
+    # unauthenticated public dashboards). This deployment's narrowly guarded
+    # single-user private-bind mode is the only exception; otherwise warn that
+    # the flag is a no-op rather than silently changing the caller's expectation.
+    if _single_user_no_auth:
+        _log.warning(
+            "Dashboard authentication is disabled for the explicit "
+            "single-user RFC1918 bind %s. Every peer that can route to this "
+            "private address must be trusted.",
+            host,
+        )
+    elif allow_public and host not in _LOOPBACK_HOST_VALUES:
         _log.warning(
             "--insecure no longer bypasses dashboard authentication. A "
             "non-loopback bind (%s) now ALWAYS requires an auth provider "
