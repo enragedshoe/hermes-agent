@@ -779,9 +779,25 @@ async def _dashboard_selftest_once() -> None:
     except ImportError:
         return  # optional dependency — leave status "unknown"
     try:
-        # Loopback base_url so the Host-header middleware accepts the request.
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
-            resp = await client.get(_DASHBOARD_SELFTEST_ROUTE, headers={_SESSION_HEADER_NAME: _SESSION_TOKEN})
+        transport = httpx.ASGITransport(app=app)
+        # ASGITransport never opens a network socket, but its base URL still
+        # supplies the Host header seen by the rebinding guard.  Match an
+        # explicit bind exactly; wildcard binds accept the loopback fallback.
+        selftest_host = (
+            getattr(app.state, "bound_host", None) or "127.0.0.1"
+        ).strip()
+        if selftest_host in {"0.0.0.0", "::"}:
+            selftest_host = "127.0.0.1"
+        selftest_authority = (
+            f"[{selftest_host}]" if ":" in selftest_host else selftest_host
+        )
+        async with httpx.AsyncClient(
+            transport=transport, base_url=f"http://{selftest_authority}"
+        ) as client:
+            resp = await client.get(
+                _DASHBOARD_SELFTEST_ROUTE,
+                headers={_SESSION_HEADER_NAME: _SESSION_TOKEN},
+            )
         DASHBOARD_HEALTH.record_selftest(resp.status_code == 200, resp.status_code)
     except Exception:
         DASHBOARD_HEALTH.record_selftest(False, None)
