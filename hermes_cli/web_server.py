@@ -1236,10 +1236,19 @@ async def _dashboard_selftest_once() -> None:
         return  # optional dependency — skip cleanly, leave status "unknown"
     try:
         transport = httpx.ASGITransport(app=app)
-        # base_url uses a loopback name so the Host-header middleware accepts
-        # the request on loopback binds.
+        # ASGITransport never opens a network socket, but its base URL still
+        # supplies the Host header seen by the rebinding guard.  Match an
+        # explicit bind exactly; wildcard binds accept the loopback fallback.
+        selftest_host = (
+            getattr(app.state, "bound_host", None) or "127.0.0.1"
+        ).strip()
+        if selftest_host in {"0.0.0.0", "::"}:
+            selftest_host = "127.0.0.1"
+        selftest_authority = (
+            f"[{selftest_host}]" if ":" in selftest_host else selftest_host
+        )
         async with httpx.AsyncClient(
-            transport=transport, base_url="http://127.0.0.1"
+            transport=transport, base_url=f"http://{selftest_authority}"
         ) as client:
             resp = await client.get(
                 _DASHBOARD_SELFTEST_ROUTE,

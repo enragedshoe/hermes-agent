@@ -5233,6 +5233,28 @@ class TestDashboardComponentHealth:
         assert self.ws.DASHBOARD_HEALTH.selftest_http_status == 500
         assert self.ws.DASHBOARD_HEALTH.snapshot()["status"] == "degraded"
 
+    def test_selftest_matches_explicit_non_loopback_bind(self, monkeypatch):
+        """The in-process probe must survive exact-LAN Host validation."""
+        pytest.importorskip("httpx")
+        monkeypatch.setattr(
+            self.ws.app.state,
+            "bound_host",
+            "192.168.1.145",
+            raising=False,
+        )
+        monkeypatch.setattr(
+            self.ws.app.state,
+            "auth_required",
+            False,
+            raising=False,
+        )
+
+        asyncio.run(self.ws._dashboard_selftest_once())
+
+        assert self.ws.DASHBOARD_HEALTH.selftest_status == "ok"
+        assert self.ws.DASHBOARD_HEALTH.selftest_http_status == 200
+        assert self.ws.DASHBOARD_HEALTH.snapshot()["status"] == "ok"
+
 
 class TestSessionPatchUnread:
     """PATCH /api/sessions/{id} with {"unread": bool} marks the session
