@@ -320,6 +320,21 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
             f"unintended spend. {remediation}"
         )
 
+    # A failed pre-run script is returned before AIAgent is constructed. Keep
+    # that structured prefix ahead of every provider heuristic: script output
+    # may itself contain timeout, 429, or authentication wording, none of which
+    # means a provider request occurred.
+    if lower.startswith("pre-run script failed:"):
+        script_error = text.split(":", 1)[1].strip()
+        if script_error.lower().startswith("script timed out"):
+            reason = "pre-run script timed out"
+        else:
+            reason = "pre-run script failed before inference"
+        return (
+            f"⚠️ Cron '{job_name}' failed: {reason}. "
+            "No model was invoked. Full details saved in cron output."
+        )
+
     # A no_agent job IS its script — run_job short-circuits it before any model
     # is reached ("no LLM involvement", see the no_agent branch in run_job). So
     # provider timeouts, rate limits, auth errors and fallback chains are not
@@ -5734,6 +5749,23 @@ def run_job(
             job, script_path, cancel_event=cancel_event,
         )
         _ran_ok, _script_output = prerun_script
+        if not _ran_ok:
+            now_iso = _hermes_now().strftime("%Y-%m-%d %H:%M:%S")
+            error = f"Pre-run script failed: {_script_output}"
+            logger.error("Job '%s' (ID: %s): %s", job_name, job_id, error)
+            failed_doc = (
+                f"# Cron Job: {job_name}\n\n"
+                f"**Job ID:** {job_id}\n"
+                f"**Run Time:** {now_iso}\n"
+                "**Status:** pre-run script failed\n\n"
+                f"{_script_output}\n"
+            )
+            alert = (
+                f"⚠ Cron job '{job_name}' pre-run script failed\n\n"
+                f"{_script_output}\n\n"
+                f"Time: {now_iso}"
+            )
+            return False, failed_doc, alert, error
         if _ran_ok and not _parse_wake_gate(_script_output):
             logger.info(
                 "Job '%s' (ID: %s): wakeAgent=false, skipping agent run",

@@ -1711,6 +1711,40 @@ class TestRunJobWakeGate:
         assert success is True
         assert err is None
 
+    @pytest.mark.parametrize(
+        ("script_error", "expected_reason"),
+        [
+            ("Script exited with code 2", "failed before inference"),
+            ("Script timed out after 900s: /tmp/preflight", "script timed out"),
+            ("HTTP 429 rate limit from dependency", "failed before inference"),
+            ("Authentication denied by dependency", "failed before inference"),
+        ],
+    )
+    def test_script_failure_fails_closed_without_running_agent(
+        self, script_error, expected_reason
+    ):
+        """A failed pre-run is reported directly and never masked by an LLM."""
+        import cron.scheduler as scheduler
+
+        with patch.object(
+            scheduler,
+            "_run_job_script",
+            return_value=(False, script_error),
+        ), patch("run_agent.AIAgent") as agent_cls:
+            job = self._make_job()
+            success, doc, final, err = scheduler.run_job(job)
+
+        agent_cls.assert_not_called()
+        assert success is False
+        assert "pre-run script failed" in doc
+        assert "pre-run script failed" in final
+        assert err == f"Pre-run script failed: {script_error}"
+
+        summary = scheduler._summarize_cron_failure_for_delivery(job, err)
+        assert expected_reason in summary
+        assert "No model was invoked" in summary
+        assert "provider" not in summary.lower()
+
 
 class TestBuildJobPromptMissingSkill:
     """Verify that a missing skill logs a warning and does not crash the job."""
