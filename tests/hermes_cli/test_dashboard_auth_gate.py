@@ -96,6 +96,7 @@ def _stub_uvicorn_run(monkeypatch):
     import contextlib
     import uvicorn
     captured: dict = {"kwargs": {}}
+    monkeypatch.setattr(web_server, "_port_bind_conflict", lambda *args, **kwargs: False)
 
     class _FakeConfig:
         loaded = True

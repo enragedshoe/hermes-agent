@@ -2028,7 +2028,7 @@ def _prepare_job_prompt(
                 f"{_script_output}\n\n"
                 f"Time: {now_iso}"
             )
-            return False, failed_doc, alert, error
+            return (False, failed_doc, alert, error), None
         if _ran_ok and not _parse_wake_gate(_script_output):
             logger.info("Job '%s' (ID: %s): wakeAgent=false, skipping agent run", job_name, job_id)
             silent_doc = (

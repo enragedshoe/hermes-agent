@@ -1817,7 +1817,7 @@ class TestRunJobWakeGate:
 
         with patch.object(
             scheduler,
-            "_run_job_script",
+            "_run_job_script_with_claim_heartbeat",
             return_value=(False, script_error),
         ), patch("run_agent.AIAgent") as agent_cls:
             job = self._make_job()
